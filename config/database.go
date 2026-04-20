@@ -19,6 +19,12 @@ func ConnectDatabase(databaseURL string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Set timezone to UTC for consistency
+	_, err = db.Exec("SET TIME ZONE 'UTC'")
+	if err != nil {
+		log.Printf("Warning: Could not set timezone to UTC: %v", err)
+	}
+
 	log.Println("Database connection established successfully")
 	return db, nil
 }
@@ -64,6 +70,18 @@ func RunMigrations(db *sql.DB) error {
 
 		// Insert default queue settings
 		`INSERT INTO queue_settings (id, is_paused) VALUES (1, FALSE) ON CONFLICT (id) DO NOTHING`,
+
+		// Add FCM token column to users table (for push notifications)
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(255)`,
+
+		// Create index for faster FCM token lookups
+		`CREATE INDEX IF NOT EXISTS idx_users_fcm_token ON users(fcm_token)`,
+
+		// Add email column to users table
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255) UNIQUE`,
+
+		// Create index for faster email lookups
+		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 	}
 
 	for _, migration := range migrations {

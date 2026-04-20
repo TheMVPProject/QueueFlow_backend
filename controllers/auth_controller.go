@@ -39,8 +39,32 @@ func (ctrl *AuthController) Login(c *fiber.Ctx) error {
 	return c.JSON(response)
 }
 
+func (ctrl *AuthController) Register(c *fiber.Ctx) error {
+	var req models.RegisterRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if req.Username == "" || req.Email == "" || req.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Username, email, and password are required",
+		})
+	}
+
+	response, err := ctrl.authService.Register(req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(response)
+}
+
 func (ctrl *AuthController) UpdateFCMToken(c *fiber.Ctx) error {
-	userID := c.Locals("userID").(int)
+	userID := c.Locals("user_id").(int)
 
 	var req struct {
 		FCMToken string `json:"fcm_token"`
@@ -52,16 +76,17 @@ func (ctrl *AuthController) UpdateFCMToken(c *fiber.Ctx) error {
 		})
 	}
 
-	if req.FCMToken == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "FCM token is required",
-		})
-	}
-
+	// Allow empty token (for logout)
 	err := ctrl.authService.UpdateFCMToken(userID, req.FCMToken)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": err.Error(),
+		})
+	}
+
+	if req.FCMToken == "" {
+		return c.JSON(fiber.Map{
+			"message": "FCM token cleared successfully",
 		})
 	}
 

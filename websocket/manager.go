@@ -40,16 +40,29 @@ func (m *Manager) Run() {
 		select {
 		case client := <-m.register:
 			m.mu.Lock()
+
+			// 🔄 NEW: Close old connection if exists
+			if existingClient, exists := m.clients[client.UserID]; exists {
+				log.Printf("Closing existing connection for UserID=%d before registering new one", client.UserID)
+				close(existingClient.Send)
+				existingClient.Conn.Close()
+			}
+
 			m.clients[client.UserID] = client
 			m.mu.Unlock()
 			log.Printf("Client registered: UserID=%d, Role=%s, Total clients=%d", client.UserID, client.Role, len(m.clients))
 
 		case client := <-m.unregister:
 			m.mu.Lock()
-			if _, ok := m.clients[client.UserID]; ok {
-				delete(m.clients, client.UserID)
-				close(client.Send)
-				log.Printf("Client unregistered: UserID=%d, Total clients=%d", client.UserID, len(m.clients))
+			if storedClient, ok := m.clients[client.UserID]; ok {
+				// Only close and delete if this is the same client instance
+				if storedClient == client {
+					delete(m.clients, client.UserID)
+					close(client.Send)
+					log.Printf("Client unregistered: UserID=%d, Total clients=%d", client.UserID, len(m.clients))
+				} else {
+					log.Printf("Skipping unregister for UserID=%d (already replaced by new connection)", client.UserID)
+				}
 			}
 			m.mu.Unlock()
 
@@ -93,17 +106,6 @@ func (m *Manager) SendToUser(userID int, message models.WSMessage) error {
 	}
 }
 
-// BroadcastToAll sends a message to all connected clients
-func (m *Manager) BroadcastToAll(message models.WSMessage) error {
-	data, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
-
-	m.broadcast <- data
-	return nil
-}
-
 // BroadcastToRole sends a message to all clients with a specific role
 func (m *Manager) BroadcastToRole(role string, message models.WSMessage) error {
 	data, err := json.Marshal(message)
@@ -125,18 +127,6 @@ func (m *Manager) BroadcastToRole(role string, message models.WSMessage) error {
 	}
 
 	return nil
-}
-
-// GetConnectedUserIDs returns list of connected user IDs
-func (m *Manager) GetConnectedUserIDs() []int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	userIDs := make([]int, 0, len(m.clients))
-	for userID := range m.clients {
-		userIDs = append(userIDs, userID)
-	}
-	return userIDs
 }
 
 // IsUserConnected checks if a user is connected

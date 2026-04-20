@@ -19,7 +19,6 @@ import (
 func main() {
 	// Load configuration
 	cfg := config.LoadConfig()
-
 	// Connect to database
 	db, err := config.ConnectDatabase(cfg.DatabaseURL)
 	if err != nil {
@@ -59,6 +58,10 @@ func main() {
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret)
 	queueService := services.NewQueueService(queueRepo, userRepo, wsManager, fcmService)
 
+	// 🔄 CRITICAL: Recover timeout timers after server restart
+	log.Println("🚀 Recovering active timeout timers...")
+	queueService.RecoverTimeouts()
+
 	// Initialize controllers
 	authController := controllers.NewAuthController(authService)
 	queueController := controllers.NewQueueController(queueService)
@@ -88,6 +91,7 @@ func main() {
 
 	// Public routes
 	app.Post("/auth/login", authController.Login)
+	app.Post("/auth/register", authController.Register)
 
 	// Protected auth routes
 	auth := app.Group("/auth", middleware.AuthMiddleware(cfg.JWTSecret))

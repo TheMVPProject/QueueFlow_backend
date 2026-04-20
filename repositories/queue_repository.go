@@ -131,15 +131,28 @@ func (r *QueueRepository) ConfirmTurn(userID int) (*models.QueueEntry, error) {
 	}
 
 	// Check if timeout has passed
-	if entry.TimeoutAt != nil && time.Now().After(*entry.TimeoutAt) {
+	if entry.TimeoutAt != nil && time.Now().UTC().After(*entry.TimeoutAt) {
 		return nil, fmt.Errorf("confirmation timeout expired")
 	}
 
+	// Get the user's position before confirming (for reordering)
+	position := entry.Position
+
 	// Update status to confirmed
-	now := time.Now()
+	now := time.Now().UTC()
 	_, err = tx.Exec(
 		"UPDATE queue_entries SET status = 'confirmed', confirmed_at = $1 WHERE id = $2",
 		now, entry.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// 🔄 CRITICAL: Reorder positions for remaining users
+	// All users with position > confirmed user's position should move up
+	_, err = tx.Exec(
+		"UPDATE queue_entries SET position = position - 1 WHERE position > $1 AND status IN ('waiting', 'called')",
+		position,
 	)
 	if err != nil {
 		return nil, err
@@ -267,9 +280,9 @@ func (r *QueueRepository) CallNextUser() (*models.QueueEntry, error) {
 		return nil, err
 	}
 
-	// Update status to 'called' and set timeout (3 minutes)
-	now := time.Now()
-	timeoutAt := now.Add(3 * time.Minute)
+	// Update status to 'called' and set timeout (exactly 3 minutes)
+	now := time.Now().UTC()
+	timeoutAt := now.Add(3 * time.Minute) // Exactly 180 seconds from now
 	_, err = tx.Exec(
 		"UPDATE queue_entries SET status = 'called', called_at = $1, timeout_at = $2 WHERE id = $3",
 		now, timeoutAt, entry.ID,
@@ -381,7 +394,48 @@ func (r *QueueRepository) GetQueueSettings() (*models.QueueSettings, error) {
 func (r *QueueRepository) UpdateQueuePauseStatus(isPaused bool) error {
 	_, err := r.db.Exec(
 		"UPDATE queue_settings SET is_paused = $1, updated_at = $2 WHERE id = 1",
-		isPaused, time.Now(),
+		isPaused, time.Now().UTC(),
 	)
 	return err
+}
+
+// GetActiveCalledUsers retrieves all users currently in "called" state with active timeouts
+func (r *QueueRepository) GetActiveCalledUsers() ([]models.QueueEntry, error) {
+	rows, err := r.db.Query(
+		`SELECT qe.id, qe.user_id, u.username, qe.position, qe.status, qe.joined_at, qe.called_at, qe.timeout_at
+		FROM queue_entries qe
+		JOIN users u ON qe.user_id = u.id
+		WHERE qe.status = 'called' AND qe.timeout_at IS NOT NULL
+		ORDER BY qe.position ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]models.QueueEntry, 0)
+	for rows.Next() {
+		var entry models.QueueEntry
+		var calledAt, timeoutAt sql.NullTime
+
+		err := rows.Scan(
+			&entry.ID, &entry.UserID, &entry.Username, &entry.Position,
+			&entry.Status, &entry.JoinedAt, &calledAt, &timeoutAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Convert sql.NullTime to *time.Time
+		if calledAt.Valid {
+			entry.CalledAt = &calledAt.Time
+		}
+		if timeoutAt.Valid {
+			entry.TimeoutAt = &timeoutAt.Time
+		}
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
 }

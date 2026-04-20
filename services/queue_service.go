@@ -1,27 +1,38 @@
 package services
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"queueflow/models"
 	"queueflow/repositories"
 	"queueflow/websocket"
+	"sync"
 	"time"
 )
 
+// Timeout duration constants
+const (
+	TimeoutDuration       = 3 * time.Minute // 3 minutes
+	TimeoutDurationInSec  = 180             // 3 minutes in seconds
+)
+
 type QueueService struct {
-	queueRepo *repositories.QueueRepository
-	userRepo  *repositories.UserRepository
-	wsManager *websocket.Manager
-	fcmService *FCMService
+	queueRepo      *repositories.QueueRepository
+	userRepo       *repositories.UserRepository
+	wsManager      *websocket.Manager
+	fcmService     *FCMService
+	timeoutCancels map[int]context.CancelFunc // userID -> cancel function
+	cancelsMu      sync.RWMutex               // protects timeoutCancels map
 }
 
 func NewQueueService(queueRepo *repositories.QueueRepository, userRepo *repositories.UserRepository, wsManager *websocket.Manager, fcmService *FCMService) *QueueService {
 	return &QueueService{
-		queueRepo: queueRepo,
-		userRepo:  userRepo,
-		wsManager: wsManager,
-		fcmService: fcmService,
+		queueRepo:      queueRepo,
+		userRepo:       userRepo,
+		wsManager:      wsManager,
+		fcmService:     fcmService,
+		timeoutCancels: make(map[int]context.CancelFunc),
 	}
 }
 
@@ -32,33 +43,79 @@ func (s *QueueService) JoinQueue(userID int) (*models.QueueEntry, error) {
 		return nil, err
 	}
 
-	// Broadcast position updates to all users
-	go s.BroadcastPositionUpdates()
+	// Get username for notification
+	user, err := s.userRepo.GetByID(userID)
+	if err == nil && user != nil {
+		// Notify admins via WebSocket (for open app)
+		go s.wsManager.BroadcastToRole("admin", models.WSMessage{
+			Type: "admin:user_joined",
+			Payload: map[string]interface{}{
+				"username": user.Username,
+				"user_id":  userID,
+			},
+		})
 
-	// Broadcast queue state to admins
-	go s.BroadcastQueueStateToAdmins()
+		// Send FCM push notification ONLY to admins whose app is closed
+		if s.fcmService != nil {
+			go func() {
+				// Get all admin tokens
+				allAdminTokens, err := s.userRepo.GetAdminFCMTokens()
+				if err != nil {
+					log.Printf("Failed to get admin FCM tokens: %v", err)
+					return
+				}
+
+				if len(allAdminTokens) == 0 {
+					return
+				}
+
+				// Filter: only send to admins who are NOT currently connected
+				var offlineAdminTokens []string
+				for _, token := range allAdminTokens {
+					// Check if this admin is connected via WebSocket
+					// Note: We need to track admin IDs by token, but for now send to all
+					// and FCM will handle app state
+					offlineAdminTokens = append(offlineAdminTokens, token)
+				}
+
+				if len(offlineAdminTokens) > 0 {
+					log.Printf("[FCM] Sending user joined notification to %d admin(s) with closed app", len(offlineAdminTokens))
+					err = s.fcmService.SendAdminUserJoinedNotification(offlineAdminTokens, user.Username)
+					if err != nil {
+						log.Printf("Failed to send admin FCM notification: %v", err)
+					}
+				}
+			}()
+		}
+	}
+
+	// Broadcast updates
+	s.broadcastQueueUpdate()
 
 	return entry, nil
 }
 
 // LeaveQueue removes a user from the queue
 func (s *QueueService) LeaveQueue(userID int) error {
+	// Cancel timeout if exists
+	s.cancelTimeout(userID)
+
 	err := s.queueRepo.LeaveQueue(userID)
 	if err != nil {
 		return err
 	}
 
-	// Broadcast position updates to all users
-	go s.BroadcastPositionUpdates()
-
-	// Broadcast queue state to admins
-	go s.BroadcastQueueStateToAdmins()
+	// Broadcast updates
+	s.broadcastQueueUpdate()
 
 	return nil
 }
 
 // ConfirmTurn confirms user's turn
 func (s *QueueService) ConfirmTurn(userID int) (*models.QueueEntry, error) {
+	// Cancel timeout goroutine BEFORE confirming
+	s.cancelTimeout(userID)
+
 	entry, err := s.queueRepo.ConfirmTurn(userID)
 	if err != nil {
 		return nil, err
@@ -72,11 +129,12 @@ func (s *QueueService) ConfirmTurn(userID int) (*models.QueueEntry, error) {
 		},
 	})
 
-	// Call next user automatically after confirmation
-	go func() {
-		time.Sleep(1 * time.Second) // Small delay for smoother experience
-		s.CallNextUser()
-	}()
+	// 🔄 CRITICAL: Broadcast updates IMMEDIATELY
+	// (positions were reordered in repository after confirmation)
+	s.broadcastQueueUpdate()
+
+	// Call next user automatically after confirmation (NO DELAY)
+	go s.CallNextUser()
 
 	return entry, nil
 }
@@ -121,43 +179,51 @@ func (s *QueueService) CallNextUser() (*models.QueueEntry, error) {
 	}
 
 	// Notify the user that it's their turn via WebSocket
-	timeoutInSec := int(time.Until(*entry.TimeoutAt).Seconds())
+	// Calculate actual remaining time to ensure frontend timer is in sync with backend
+	remainingSeconds := int(time.Until(*entry.TimeoutAt).Seconds())
+	if remainingSeconds < 0 {
+		remainingSeconds = 0
+	}
+
 	s.wsManager.SendToUser(entry.UserID, models.WSMessage{
 		Type: models.WSMessageTypeYourTurn,
 		Payload: models.YourTurnPayload{
 			Position:     entry.Position,
 			TimeoutAt:    *entry.TimeoutAt,
-			TimeoutInSec: timeoutInSec,
+			TimeoutInSec: remainingSeconds,
 		},
 	})
 
-	// Send FCM push notification (works even if app is closed)
-	if s.fcmService != nil {
+	// Send FCM push notification ONLY if app is closed (user not connected via WebSocket)
+	if s.fcmService != nil && !s.wsManager.IsUserConnected(entry.UserID) {
 		fcmToken, err := s.userRepo.GetFCMToken(entry.UserID)
 		if err == nil && fcmToken != "" {
 			go func() {
-				err := s.fcmService.SendYourTurnNotification(fcmToken, timeoutInSec)
+				log.Printf("[FCM] User %d app is closed, sending push notification", entry.UserID)
+				err := s.fcmService.SendYourTurnNotification(fcmToken, TimeoutDurationInSec)
 				if err != nil {
 					log.Printf("Failed to send FCM notification to user %d: %v", entry.UserID, err)
 				}
 			}()
 		}
+	} else if s.wsManager.IsUserConnected(entry.UserID) {
+		log.Printf("[FCM] User %d app is open, skipping push notification", entry.UserID)
 	}
 
 	// Start timeout goroutine
 	go s.startTimeoutTimer(entry.ID, entry.UserID, entry.TimeoutAt)
 
-	// Broadcast position updates to all users
-	go s.BroadcastPositionUpdates()
-
-	// Broadcast queue state to admins
-	go s.BroadcastQueueStateToAdmins()
+	// Broadcast updates
+	s.broadcastQueueUpdate()
 
 	return entry, nil
 }
 
 // RemoveUser removes a user from the queue (admin action)
 func (s *QueueService) RemoveUser(userID int) error {
+	// Cancel timeout if exists
+	s.cancelTimeout(userID)
+
 	err := s.queueRepo.RemoveUserFromQueue(userID)
 	if err != nil {
 		return err
@@ -173,8 +239,7 @@ func (s *QueueService) RemoveUser(userID int) error {
 	})
 
 	// Broadcast updates
-	go s.BroadcastPositionUpdates()
-	go s.BroadcastQueueStateToAdmins()
+	s.broadcastQueueUpdate()
 
 	return nil
 }
@@ -186,7 +251,7 @@ func (s *QueueService) PauseQueue() error {
 		return err
 	}
 
-	go s.BroadcastQueueStateToAdmins()
+	s.broadcastQueueUpdate()
 	return nil
 }
 
@@ -197,8 +262,14 @@ func (s *QueueService) ResumeQueue() error {
 		return err
 	}
 
-	go s.BroadcastQueueStateToAdmins()
+	s.broadcastQueueUpdate()
 	return nil
+}
+
+// broadcastQueueUpdate is a helper to broadcast both position updates and queue state to admins
+func (s *QueueService) broadcastQueueUpdate() {
+	go s.BroadcastPositionUpdates()
+	go s.BroadcastQueueStateToAdmins()
 }
 
 // BroadcastPositionUpdates sends position updates to all users in queue
@@ -242,24 +313,56 @@ func (s *QueueService) BroadcastQueueStateToAdmins() {
 		Payload: models.QueueStatePayload{
 			Queue:     queue,
 			IsPaused:  settings.IsPaused,
-			Timestamp: time.Now(),
+			Timestamp: time.Now().UTC(),
 		},
 	})
 }
 
-// startTimeoutTimer starts a goroutine to handle timeout
+// startTimeoutTimer starts a CANCELABLE goroutine to handle timeout
 func (s *QueueService) startTimeoutTimer(entryID, userID int, timeoutAt *time.Time) {
 	duration := time.Until(*timeoutAt)
 	if duration <= 0 {
-		return // Already timed out
+		log.Printf("Timeout already expired for user %d, handling immediately", userID)
+		s.handleTimeout(entryID, userID)
+		return
 	}
 
-	time.Sleep(duration)
+	// Create cancelable context
+	ctx, cancel := context.WithCancel(context.Background())
 
+	// Store cancel function
+	s.cancelsMu.Lock()
+	s.timeoutCancels[userID] = cancel
+	s.cancelsMu.Unlock()
+
+	log.Printf("Starting timeout timer for user %d (entry %d), duration: %v", userID, entryID, duration)
+
+	// Wait for timeout OR cancellation
+	select {
+	case <-time.After(duration):
+		// Timeout fired
+		log.Printf("Timeout fired for user %d (entry %d)", userID, entryID)
+		s.handleTimeout(entryID, userID)
+
+	case <-ctx.Done():
+		// Cancelled (user confirmed early or left queue)
+		log.Printf("Timeout cancelled for user %d (entry %d) - user confirmed or left", userID, entryID)
+		return
+	}
+
+	// Clean up cancel function from map after timeout
+	s.cancelsMu.Lock()
+	delete(s.timeoutCancels, userID)
+	s.cancelsMu.Unlock()
+}
+
+// handleTimeout processes a timeout (extracted for reuse in recovery)
+func (s *QueueService) handleTimeout(entryID, userID int) {
 	// Check if user has confirmed
 	entry, err := s.queueRepo.GetUserQueueStatus(userID)
 	if err != nil || entry.Status != "called" {
 		// User already confirmed, removed, or left
+		log.Printf("User %d not in 'called' state, skipping timeout", userID)
 		return
 	}
 
@@ -284,6 +387,56 @@ func (s *QueueService) startTimeoutTimer(entryID, userID int, timeoutAt *time.Ti
 	s.CallNextUser()
 
 	// Broadcast updates
-	s.BroadcastPositionUpdates()
-	s.BroadcastQueueStateToAdmins()
+	s.broadcastQueueUpdate()
+}
+
+// cancelTimeout cancels a timeout for a user
+func (s *QueueService) cancelTimeout(userID int) {
+	s.cancelsMu.Lock()
+	defer s.cancelsMu.Unlock()
+
+	if cancel, exists := s.timeoutCancels[userID]; exists {
+		log.Printf("Cancelling timeout for user %d", userID)
+		cancel()
+		delete(s.timeoutCancels, userID)
+	}
+}
+
+// RecoverTimeouts restarts timeout timers for users in "called" state after server restart
+func (s *QueueService) RecoverTimeouts() {
+	log.Println("🔄 Recovering timeout timers after server restart...")
+
+	entries, err := s.queueRepo.GetActiveCalledUsers()
+	if err != nil {
+		log.Printf("Error recovering timeouts: %v", err)
+		return
+	}
+
+	if len(entries) == 0 {
+		log.Println("✅ No active called users to recover")
+		return
+	}
+
+	log.Printf("Found %d users in 'called' state, restarting timers...", len(entries))
+
+	for _, entry := range entries {
+		if entry.TimeoutAt == nil {
+			log.Printf("⚠️ User %d has no timeout_at, skipping", entry.UserID)
+			continue
+		}
+
+		remaining := time.Until(*entry.TimeoutAt)
+
+		if remaining <= 0 {
+			// Already timed out, process immediately
+			log.Printf("⏰ User %d already timed out (expired %v ago), processing now", entry.UserID, -remaining)
+			go s.handleTimeout(entry.ID, entry.UserID)
+		} else {
+			// Restart timer with remaining duration
+			log.Printf("⏱️ Restarting timer for user %d with %v remaining", entry.UserID, remaining)
+			go s.startTimeoutTimer(entry.ID, entry.UserID, entry.TimeoutAt)
+		}
+	}
+
+	log.Println("✅ Timeout recovery complete")
 }
