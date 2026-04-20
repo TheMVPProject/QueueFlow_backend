@@ -8,9 +8,10 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string
-	JWTSecret   string
-	Port        string
+	DatabaseURL              string
+	JWTSecret                string
+	Port                     string
+	FirebaseServiceAccountPath string
 }
 
 func LoadConfig() *Config {
@@ -18,9 +19,10 @@ func LoadConfig() *Config {
 	_ = godotenv.Load()
 
 	config := &Config{
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/queueflow?sslmode=disable"),
-		JWTSecret:   getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
-		Port:        getEnv("PORT", "8080"),
+		DatabaseURL:              getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/queueflow?sslmode=disable"),
+		JWTSecret:                getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
+		Port:                     getEnv("PORT", "8080"),
+		FirebaseServiceAccountPath: getEnv("FIREBASE_SERVICE_ACCOUNT_PATH", "firebase-service-account.json"),
 	}
 
 	if config.JWTSecret == "your-secret-key-change-in-production" {

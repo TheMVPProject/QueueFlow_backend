@@ -47,11 +47,11 @@ func main() {
 	go wsManager.Run()
 
 	// Initialize FCM service
-	fcmService, err := services.NewFCMService("firebase-service-account.json")
+	fcmService, err := services.NewFCMService(cfg.FirebaseServiceAccountPath)
 	if err != nil {
 		log.Printf("Warning: FCM service not initialized: %v", err)
 		log.Println("Push notifications when app is closed will not work")
-		log.Println("To enable, download firebase-service-account.json from Firebase Console")
+		log.Printf("To enable, set FIREBASE_SERVICE_ACCOUNT_PATH environment variable or place file at: %s", cfg.FirebaseServiceAccountPath)
 		fcmService = nil // Continue without FCM
 	}
 
