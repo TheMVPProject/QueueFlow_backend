@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -14,10 +16,20 @@ type FCMService struct {
 	client *messaging.Client
 }
 
-func NewFCMService(serviceAccountPath string) (*FCMService, error) {
+func NewFCMService() (*FCMService, error) {
 	ctx := context.Background()
 
-	opt := option.WithCredentialsFile(serviceAccountPath)
+	credentialsBase64 := os.Getenv("FIREBASE_CREDENTIALS_BASE64")
+	if credentialsBase64 == "" {
+		return nil, fmt.Errorf("FIREBASE_CREDENTIALS_BASE64 environment variable is not set")
+	}
+
+	credentialsJSON, err := base64.StdEncoding.DecodeString(credentialsBase64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 credentials: %v", err)
+	}
+
+	opt := option.WithCredentialsJSON(credentialsJSON)
 	app, err := firebase.NewApp(ctx, nil, opt)
 	if err != nil {
 		return nil, fmt.Errorf("error initializing firebase app: %v", err)
