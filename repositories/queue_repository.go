@@ -107,13 +107,21 @@ func (r *QueueRepository) ConfirmTurn(userID int) (*models.QueueEntry, error) {
 
 	// Lock the row and verify status
 	var entry models.QueueEntry
+	var calledAt, timeoutAt sql.NullTime
 	err = tx.QueryRow(
 		`SELECT id, user_id, position, status, joined_at, called_at, timeout_at
 		FROM queue_entries
 		WHERE user_id = $1 AND status = 'called'
 		FOR UPDATE`,
 		userID,
-	).Scan(&entry.ID, &entry.UserID, &entry.Position, &entry.Status, &entry.JoinedAt, &entry.CalledAt, &entry.TimeoutAt)
+	).Scan(&entry.ID, &entry.UserID, &entry.Position, &entry.Status, &entry.JoinedAt, &calledAt, &timeoutAt)
+
+	if calledAt.Valid {
+		entry.CalledAt = &calledAt.Time
+	}
+	if timeoutAt.Valid {
+		entry.TimeoutAt = &timeoutAt.Time
+	}
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -123,7 +131,7 @@ func (r *QueueRepository) ConfirmTurn(userID int) (*models.QueueEntry, error) {
 	}
 
 	// Check if timeout has passed
-	if entry.TimeoutAt.Valid && time.Now().After(entry.TimeoutAt.Time) {
+	if entry.TimeoutAt != nil && time.Now().After(*entry.TimeoutAt) {
 		return nil, fmt.Errorf("confirmation timeout expired")
 	}
 
@@ -138,7 +146,7 @@ func (r *QueueRepository) ConfirmTurn(userID int) (*models.QueueEntry, error) {
 	}
 
 	entry.Status = "confirmed"
-	entry.ConfirmedAt = sql.NullTime{Time: now, Valid: true}
+	entry.ConfirmedAt = &now
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -161,16 +169,31 @@ func (r *QueueRepository) GetQueueList() ([]models.QueueEntry, error) {
 	}
 	defer rows.Close()
 
-	var entries []models.QueueEntry
+	// Initialize as empty slice to ensure JSON marshals to [] instead of null
+	entries := make([]models.QueueEntry, 0)
 	for rows.Next() {
 		var entry models.QueueEntry
+		var calledAt, confirmedAt, timeoutAt sql.NullTime
+
 		err := rows.Scan(
 			&entry.ID, &entry.UserID, &entry.Username, &entry.Position,
-			&entry.Status, &entry.JoinedAt, &entry.CalledAt, &entry.ConfirmedAt, &entry.TimeoutAt,
+			&entry.Status, &entry.JoinedAt, &calledAt, &confirmedAt, &timeoutAt,
 		)
 		if err != nil {
 			return nil, err
 		}
+
+		// Convert sql.NullTime to *time.Time
+		if calledAt.Valid {
+			entry.CalledAt = &calledAt.Time
+		}
+		if confirmedAt.Valid {
+			entry.ConfirmedAt = &confirmedAt.Time
+		}
+		if timeoutAt.Valid {
+			entry.TimeoutAt = &timeoutAt.Time
+		}
+
 		entries = append(entries, entry)
 	}
 
@@ -180,15 +203,28 @@ func (r *QueueRepository) GetQueueList() ([]models.QueueEntry, error) {
 // GetUserQueueStatus gets a specific user's queue status
 func (r *QueueRepository) GetUserQueueStatus(userID int) (*models.QueueEntry, error) {
 	entry := &models.QueueEntry{}
+	var calledAt, confirmedAt, timeoutAt sql.NullTime
+
 	err := r.db.QueryRow(
 		`SELECT qe.id, qe.user_id, qe.position, qe.status, qe.joined_at, qe.called_at, qe.confirmed_at, qe.timeout_at
 		FROM queue_entries qe
 		WHERE qe.user_id = $1 AND qe.status IN ('waiting', 'called')`,
 		userID,
-	).Scan(&entry.ID, &entry.UserID, &entry.Position, &entry.Status, &entry.JoinedAt, &entry.CalledAt, &entry.ConfirmedAt, &entry.TimeoutAt)
+	).Scan(&entry.ID, &entry.UserID, &entry.Position, &entry.Status, &entry.JoinedAt, &calledAt, &confirmedAt, &timeoutAt)
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Convert sql.NullTime to *time.Time
+	if calledAt.Valid {
+		entry.CalledAt = &calledAt.Time
+	}
+	if confirmedAt.Valid {
+		entry.ConfirmedAt = &confirmedAt.Time
+	}
+	if timeoutAt.Valid {
+		entry.TimeoutAt = &timeoutAt.Time
 	}
 
 	return entry, nil
@@ -243,8 +279,8 @@ func (r *QueueRepository) CallNextUser() (*models.QueueEntry, error) {
 	}
 
 	entry.Status = "called"
-	entry.CalledAt = sql.NullTime{Time: now, Valid: true}
-	entry.TimeoutAt = sql.NullTime{Time: timeoutAt, Valid: true}
+	entry.CalledAt = &now
+	entry.TimeoutAt = &timeoutAt
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
