@@ -46,9 +46,18 @@ func main() {
 	wsManager := websocket.NewManager()
 	go wsManager.Run()
 
+	// Initialize FCM service
+	fcmService, err := services.NewFCMService("firebase-service-account.json")
+	if err != nil {
+		log.Printf("Warning: FCM service not initialized: %v", err)
+		log.Println("Push notifications when app is closed will not work")
+		log.Println("To enable, download firebase-service-account.json from Firebase Console")
+		fcmService = nil // Continue without FCM
+	}
+
 	// Initialize services
 	authService := services.NewAuthService(userRepo, cfg.JWTSecret)
-	queueService := services.NewQueueService(queueRepo, wsManager)
+	queueService := services.NewQueueService(queueRepo, userRepo, wsManager, fcmService)
 
 	// Initialize controllers
 	authController := controllers.NewAuthController(authService)

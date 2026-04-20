@@ -11,13 +11,17 @@ import (
 
 type QueueService struct {
 	queueRepo *repositories.QueueRepository
+	userRepo  *repositories.UserRepository
 	wsManager *websocket.Manager
+	fcmService *FCMService
 }
 
-func NewQueueService(queueRepo *repositories.QueueRepository, wsManager *websocket.Manager) *QueueService {
+func NewQueueService(queueRepo *repositories.QueueRepository, userRepo *repositories.UserRepository, wsManager *websocket.Manager, fcmService *FCMService) *QueueService {
 	return &QueueService{
 		queueRepo: queueRepo,
+		userRepo:  userRepo,
 		wsManager: wsManager,
+		fcmService: fcmService,
 	}
 }
 
@@ -116,7 +120,7 @@ func (s *QueueService) CallNextUser() (*models.QueueEntry, error) {
 		return nil, err
 	}
 
-	// Notify the user that it's their turn
+	// Notify the user that it's their turn via WebSocket
 	timeoutInSec := int(time.Until(*entry.TimeoutAt).Seconds())
 	s.wsManager.SendToUser(entry.UserID, models.WSMessage{
 		Type: models.WSMessageTypeYourTurn,
@@ -126,6 +130,19 @@ func (s *QueueService) CallNextUser() (*models.QueueEntry, error) {
 			TimeoutInSec: timeoutInSec,
 		},
 	})
+
+	// Send FCM push notification (works even if app is closed)
+	if s.fcmService != nil {
+		fcmToken, err := s.userRepo.GetFCMToken(entry.UserID)
+		if err == nil && fcmToken != "" {
+			go func() {
+				err := s.fcmService.SendYourTurnNotification(fcmToken, timeoutInSec)
+				if err != nil {
+					log.Printf("Failed to send FCM notification to user %d: %v", entry.UserID, err)
+				}
+			}()
+		}
+	}
 
 	// Start timeout goroutine
 	go s.startTimeoutTimer(entry.ID, entry.UserID, entry.TimeoutAt)
