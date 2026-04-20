@@ -1,20 +1,19 @@
 package models
 
 import (
-	"database/sql"
 	"time"
 )
 
 type QueueEntry struct {
-	ID          int          `json:"id"`
-	UserID      int          `json:"user_id"`
-	Username    string       `json:"username,omitempty"`
-	Position    int          `json:"position"`
-	Status      string       `json:"status"`
-	JoinedAt    time.Time    `json:"joined_at"`
-	CalledAt    sql.NullTime `json:"called_at,omitempty"`
-	ConfirmedAt sql.NullTime `json:"confirmed_at,omitempty"`
-	TimeoutAt   sql.NullTime `json:"timeout_at,omitempty"`
+	ID          int        `json:"id"`
+	UserID      int        `json:"user_id"`
+	Username    string     `json:"username,omitempty"`
+	Position    int        `json:"position"`
+	Status      string     `json:"status"`
+	JoinedAt    time.Time  `json:"joined_at"`
+	CalledAt    *time.Time `json:"called_at,omitempty"`
+	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
+	TimeoutAt   *time.Time `json:"timeout_at,omitempty"`
 }
 
 type QueueStatus struct {

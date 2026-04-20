@@ -80,6 +80,10 @@ func main() {
 	// Public routes
 	app.Post("/auth/login", authController.Login)
 
+	// Protected auth routes
+	auth := app.Group("/auth", middleware.AuthMiddleware(cfg.JWTSecret))
+	auth.Post("/fcm-token", authController.UpdateFCMToken)
+
 	// WebSocket route (requires authentication)
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if fiberwebsocket.IsWebSocketUpgrade(c) {

@@ -64,6 +64,11 @@ func (s *AuthService) Login(req models.LoginRequest) (*models.LoginResponse, err
 	}, nil
 }
 
+// UpdateFCMToken updates the FCM token for a user
+func (s *AuthService) UpdateFCMToken(userID int, fcmToken string) error {
+	return s.userRepo.UpdateFCMToken(userID, fcmToken)
+}
+
 // HashPassword creates a bcrypt hash of the password
 func HashPassword(password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)

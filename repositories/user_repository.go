@@ -40,3 +40,29 @@ func (r *UserRepository) GetByID(userID int) (*models.User, error) {
 
 	return user, nil
 }
+
+func (r *UserRepository) UpdateFCMToken(userID int, fcmToken string) error {
+	_, err := r.db.Exec(
+		"UPDATE users SET fcm_token = $1 WHERE id = $2",
+		fcmToken, userID,
+	)
+	return err
+}
+
+func (r *UserRepository) GetFCMToken(userID int) (string, error) {
+	var fcmToken sql.NullString
+	err := r.db.QueryRow(
+		"SELECT fcm_token FROM users WHERE id = $1",
+		userID,
+	).Scan(&fcmToken)
+
+	if err != nil {
+		return "", err
+	}
+
+	if fcmToken.Valid {
+		return fcmToken.String, nil
+	}
+
+	return "", nil
+}

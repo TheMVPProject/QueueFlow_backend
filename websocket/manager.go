@@ -152,9 +152,11 @@ func (m *Manager) HandleClient(client *Client) {
 	// Register the client
 	m.register <- client
 
-	// Start goroutines for reading and writing
+	// Start write pump in goroutine
 	go client.writePump()
-	go client.readPump(m)
+
+	// Read pump runs in current goroutine (blocks until connection closes)
+	client.readPump(m)
 }
 
 // writePump sends messages from the send channel to the WebSocket connection

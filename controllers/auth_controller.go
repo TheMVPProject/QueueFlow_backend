@@ -38,3 +38,34 @@ func (ctrl *AuthController) Login(c *fiber.Ctx) error {
 
 	return c.JSON(response)
 }
+
+func (ctrl *AuthController) UpdateFCMToken(c *fiber.Ctx) error {
+	userID := c.Locals("userID").(int)
+
+	var req struct {
+		FCMToken string `json:"fcm_token"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if req.FCMToken == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "FCM token is required",
+		})
+	}
+
+	err := ctrl.authService.UpdateFCMToken(userID, req.FCMToken)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "FCM token updated successfully",
+	})
+}
