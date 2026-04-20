@@ -248,3 +248,24 @@ This implementation prioritizes:
 ## 👨‍💻 Author
 
 mohidsk
+
+---
+
+## 👨‍💻 Author
+mohidsk
+
+---
+
+## 📝 QueueFlow Submission Notes
+
+### Completed
+- Full queue flow (join → call → confirm → timeout)
+- Authentication system
+- Real-time updates (WebSocket)
+- Admin controls
+- Backend deployment (Railway)
+
+### Remaining / Limitations
+- FCM edge cases (token refresh / reliability)
+- Minor reconnect synchronization gaps
+- Not tested on physical iOS device
