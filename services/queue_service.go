@@ -31,6 +31,9 @@ func (s *QueueService) JoinQueue(userID int) (*models.QueueEntry, error) {
 	// Broadcast position updates to all users
 	go s.BroadcastPositionUpdates()
 
+	// Broadcast queue state to admins
+	go s.BroadcastQueueStateToAdmins()
+
 	return entry, nil
 }
 
@@ -43,6 +46,9 @@ func (s *QueueService) LeaveQueue(userID int) error {
 
 	// Broadcast position updates to all users
 	go s.BroadcastPositionUpdates()
+
+	// Broadcast queue state to admins
+	go s.BroadcastQueueStateToAdmins()
 
 	return nil
 }
@@ -96,14 +102,8 @@ func (s *QueueService) GetUserQueueStatus(userID int) (*models.QueueStatus, erro
 		Position:     entry.Position,
 		Status:       entry.Status,
 		TotalInQueue: len(queue),
-	}
-
-	if entry.CalledAt.Valid {
-		status.CalledAt = &entry.CalledAt.Time
-	}
-
-	if entry.TimeoutAt.Valid {
-		status.TimeoutAt = &entry.TimeoutAt.Time
+		CalledAt:     entry.CalledAt,
+		TimeoutAt:    entry.TimeoutAt,
 	}
 
 	return status, nil
@@ -117,18 +117,18 @@ func (s *QueueService) CallNextUser() (*models.QueueEntry, error) {
 	}
 
 	// Notify the user that it's their turn
-	timeoutInSec := int(time.Until(entry.TimeoutAt.Time).Seconds())
+	timeoutInSec := int(time.Until(*entry.TimeoutAt).Seconds())
 	s.wsManager.SendToUser(entry.UserID, models.WSMessage{
 		Type: models.WSMessageTypeYourTurn,
 		Payload: models.YourTurnPayload{
 			Position:     entry.Position,
-			TimeoutAt:    entry.TimeoutAt.Time,
+			TimeoutAt:    *entry.TimeoutAt,
 			TimeoutInSec: timeoutInSec,
 		},
 	})
 
 	// Start timeout goroutine
-	go s.startTimeoutTimer(entry.ID, entry.UserID, entry.TimeoutAt.Time)
+	go s.startTimeoutTimer(entry.ID, entry.UserID, entry.TimeoutAt)
 
 	// Broadcast position updates to all users
 	go s.BroadcastPositionUpdates()
@@ -231,8 +231,8 @@ func (s *QueueService) BroadcastQueueStateToAdmins() {
 }
 
 // startTimeoutTimer starts a goroutine to handle timeout
-func (s *QueueService) startTimeoutTimer(entryID, userID int, timeoutAt time.Time) {
-	duration := time.Until(timeoutAt)
+func (s *QueueService) startTimeoutTimer(entryID, userID int, timeoutAt *time.Time) {
+	duration := time.Until(*timeoutAt)
 	if duration <= 0 {
 		return // Already timed out
 	}
