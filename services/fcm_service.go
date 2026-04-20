@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -14,21 +16,48 @@ type FCMService struct {
 	client *messaging.Client
 }
 
-func NewFCMService(serviceAccountPath string) (*FCMService, error) {
+// InitFirebase initializes Firebase Admin SDK using base64-encoded credentials
+func InitFirebase() (*messaging.Client, error) {
 	ctx := context.Background()
+	var app *firebase.App
+	var err error
 
-	opt := option.WithCredentialsFile(serviceAccountPath)
-	app, err := firebase.NewApp(ctx, nil, opt)
-	if err != nil {
-		return nil, fmt.Errorf("error initializing firebase app: %v", err)
+	base64Creds := os.Getenv("FIREBASE_CREDENTIALS_BASE64")
+	if base64Creds == "" {
+		return nil, fmt.Errorf("FIREBASE_CREDENTIALS_BASE64 environment variable is not set")
 	}
 
+	log.Println("🔑 Using Firebase credentials from base64")
+
+	decodedCreds, err := base64.StdEncoding.DecodeString(base64Creds)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding base64 Firebase credentials: %v", err)
+	}
+
+	opt := option.WithCredentialsJSON(decodedCreds)
+	app, err = firebase.NewApp(ctx, nil, opt)
+	if err != nil {
+		return nil, fmt.Errorf("error initializing Firebase app with base64 credentials: %v", err)
+	}
+
+	// Initialize messaging client
 	client, err := app.Messaging(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error getting messaging client: %v", err)
+		return nil, fmt.Errorf("error getting Firebase messaging client: %v", err)
 	}
 
-	log.Println("FCM Service initialized successfully")
+	log.Println("✅ Firebase Admin SDK initialized successfully")
+	return client, nil
+}
+
+// NewFCMService creates a new FCM service instance
+// Credentials are loaded from FIREBASE_CREDENTIALS_BASE64 environment variable
+func NewFCMService() (*FCMService, error) {
+	client, err := InitFirebase()
+	if err != nil {
+		return nil, err
+	}
+
 	return &FCMService{client: client}, nil
 }
 
