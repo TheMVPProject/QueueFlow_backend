@@ -247,12 +247,7 @@ This implementation prioritizes:
 
 ## 👨‍💻 Author
 
-mohidsk
-
----
-
-## 👨‍💻 Author
-mohidsk
+Shaik Sadiq
 
 ---
 
